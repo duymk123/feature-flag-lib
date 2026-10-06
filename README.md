@@ -196,6 +196,26 @@ Dùng để bảo vệ trực tiếp method (Controller endpoint hoặc Service 
 
 ## 6. Hướng dẫn cài đặt & Tích hợp vào Microservice
 
+### Cấu hình thread pool đánh giá cờ
+
+Ứng dụng import thư viện có thể ghi đè executor dùng bởi `evaluateAll()` trong `application.yml`:
+
+```yaml
+feature-flag:
+  executor:
+    core-pool-size: 4
+    max-pool-size: 16
+    queue-capacity: 16
+    max-pending-tasks: 24
+    thread-name-prefix: ff-eval-
+    wait-for-tasks-to-complete-on-shutdown: true
+    await-termination-seconds: 10
+```
+
+Các giá trị mặc định lần lượt là `4`, `8`, `16`, `24`, `ff-eval-`, `true`, `10`. Mỗi task đánh giá một flag rồi hoàn tất để worker quay lại pool nhận task tiếp theo. `max-pending-tasks` giới hạn số task đang chạy/chờ được submit bởi một lần `evaluateAll()`; các task tiếp theo chỉ được submit khi có task hoàn tất. Với 5.000 flag, vẫn có 5.000 lượt đánh giá nhưng không giữ 5.000 future đang chờ cùng lúc. Queue hữu hạn cho pool cơ hội mở rộng từ core lên max; khi pool và queue đầy, backpressure chạy task trên thread submit thay vì từ chối. Ứng dụng cũng có thể khai báo bean tên `featureFlagExecutor` để thay thế hoàn toàn executor mặc định.
+
+Lưu ý: `spring.task.execution.pool.*` cấu hình executor mặc định của Spring Boot. Thư viện này dùng executor bean riêng tên `featureFlagExecutor`, nên cấu hình của nó nằm dưới `feature-flag.executor.*` như ví dụ trên.
+
 ### 6.1. Yêu cầu môi trường
 * **JDK**: `21` trở lên.
 * **Build Tool**: Apache Maven `3.8+` (hoặc Maven Wrapper đi kèm dự án).

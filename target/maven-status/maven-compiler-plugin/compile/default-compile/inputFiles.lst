@@ -3,6 +3,7 @@ D:\Code\library\feature-flag-lib\src\main\java\com\example\featureflag\annotatio
 D:\Code\library\feature-flag-lib\src\main\java\com\example\featureflag\aspect\FeatureFlagAspect.java
 D:\Code\library\feature-flag-lib\src\main\java\com\example\featureflag\client\FeatureFlagClient.java
 D:\Code\library\feature-flag-lib\src\main\java\com\example\featureflag\config\FeatureFlagAutoConfiguration.java
+D:\Code\library\feature-flag-lib\src\main\java\com\example\featureflag\config\FeatureFlagExecutorProperties.java
 D:\Code\library\feature-flag-lib\src\main\java\com\example\featureflag\dto\FeatureFlagSyncItem.java
 D:\Code\library\feature-flag-lib\src\main\java\com\example\featureflag\dto\FeatureFlagSyncRequest.java
 D:\Code\library\feature-flag-lib\src\main\java\com\example\featureflag\dto\StrategyItemSync.java

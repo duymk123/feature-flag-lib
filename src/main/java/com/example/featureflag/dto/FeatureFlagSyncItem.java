@@ -15,8 +15,10 @@ import java.util.List;
 @AllArgsConstructor
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class FeatureFlagSyncItem {
+    private String id;
     private String flagName;
     private Boolean enabled;
+    private String parentId;
     private String strategyLogic;
     private String version;
     private List<StrategyItemSync> strategies;

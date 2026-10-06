@@ -7,9 +7,9 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 public class FeatureFlagExecutorProperties {
 
     private int corePoolSize = 4;
-    private int maxPoolSize = 16;
-    private int queueCapacity = 500;
-    private int evaluationBatchSize = 100;
+    private int maxPoolSize = 8;
+    private int queueCapacity = 16;
+    private int maxPendingTasks = 24;
     private String threadNamePrefix = "ff-eval-";
     private boolean waitForTasksToCompleteOnShutdown = true;
     private int awaitTerminationSeconds = 10;
@@ -38,12 +38,12 @@ public class FeatureFlagExecutorProperties {
         this.queueCapacity = queueCapacity;
     }
 
-    public int getEvaluationBatchSize() {
-        return evaluationBatchSize;
+    public int getMaxPendingTasks() {
+        return maxPendingTasks;
     }
 
-    public void setEvaluationBatchSize(int evaluationBatchSize) {
-        this.evaluationBatchSize = evaluationBatchSize;
+    public void setMaxPendingTasks(int maxPendingTasks) {
+        this.maxPendingTasks = maxPendingTasks;
     }
 
     public String getThreadNamePrefix() {

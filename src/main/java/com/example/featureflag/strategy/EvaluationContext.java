@@ -3,7 +3,7 @@ package com.example.featureflag.strategy;
 import org.springframework.security.core.GrantedAuthority;
 
 import java.util.Collection;
-import java.util.Collections;
+import java.util.List;
 
 /**
  * Ngữ cảnh người dùng và request tại thời điểm đánh giá cờ tính năng.
@@ -17,12 +17,12 @@ public record EvaluationContext(
     public static EvaluationContext of(String username, Collection<? extends GrantedAuthority> authorities, String clientIp) {
         return new EvaluationContext(
                 username,
-                authorities != null ? authorities : Collections.emptyList(),
+                authorities != null ? List.copyOf(authorities) : List.of(),
                 clientIp
         );
     }
 
     public static EvaluationContext empty() {
-        return new EvaluationContext(null, Collections.emptyList(), null);
+        return new EvaluationContext(null, List.of(), null);
     }
 }

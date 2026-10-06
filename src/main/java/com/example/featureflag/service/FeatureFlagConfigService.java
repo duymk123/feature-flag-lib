@@ -6,22 +6,12 @@ import java.util.Map;
 
 public interface FeatureFlagConfigService {
 
-    /**
-     * Nhận và lưu trữ bản snapshot cấu hình cờ mới nhất vào Database cục bộ (deleteAll & saveAll).
-     */
+    /** Lưu snapshot cờ mới vào DB cục bộ và làm mới cache cấu hình. */
     int syncSnapshot(FeatureFlagSyncRequest request);
 
-    /**
-     * Đánh giá trạng thái BẬT/TẮT của một cờ tính năng cho ngữ cảnh request hiện tại:
-     *      Tự động trích xuất IP từ HttpServletRequest (hỗ trợ X-Forwarded-For).
-     *      Tự động trích xuất Username và Roles từ Spring SecurityContext.
-     *      Đánh giá các chiến lược theo logic cấu hình (AND/OR).
-     */
+    /** Đánh giá một flag theo context của request hiện tại. */
     boolean isEnabled(String flagName);
 
-    /**
-     * Đánh giá toàn bộ danh sách cờ tính năng hiện có trong hệ thống và trả về json trong đăng nhập
-     * Thường được gọi trong quá trình Login để trả về JSON trạng thái cờ cho Frontend lưu vào session/store.</p>
-     */
+    /** Đánh giá toàn bộ flag cho context hiện tại, thường được gọi khi login hoặc refresh token. */
     Map<String, Boolean> evaluateAll();
 }

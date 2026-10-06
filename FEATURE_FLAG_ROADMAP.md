@@ -6,29 +6,29 @@
 
 ```mermaid
 flowchart LR
-    A[Admin thay đổi flag] --> B[feature-flag-service lưu cấu hình]
-    B -->|Apply: JSON multipart| C[tracking-order /sync-file]
-    C --> D[InternalFeatureFlagServiceImpl]
-    D --> E[FeatureFlagClient.syncSnapshot]
-    E --> F[FeatureFlagConfigServiceImpl.syncSnapshot]
-    F --> G[(tracking-order DB: feature_flag_configs)]
-    F --> H[refreshCache: flagCache + idCache]
+    A["Admin thay đổi flag"] --> B["feature-flag-service lưu cấu hình"]
+    B -->|"Apply: JSON multipart"| C["tracking-order: /sync-file"]
+    C --> D["InternalFeatureFlagServiceImpl"]
+    D --> E["FeatureFlagClient.syncSnapshot()"]
+    E --> F["FeatureFlagConfigServiceImpl.syncSnapshot()"]
+    F --> G[("tracking-order DB: feature_flag_configs")]
+    F --> H["refreshCache(): flagCache + idCache"]
 
-    I[Login / Refresh /me] --> J[AuthServiceImpl]
-    J --> K[FeatureFlagClient.evaluateAll]
-    K --> L[FeatureFlagConfigServiceImpl.evaluateAll]
+    I["Login / Refresh /me"] --> J["AuthServiceImpl"]
+    J --> K["FeatureFlagClient.evaluateAll()"]
+    K --> L["FeatureFlagConfigServiceImpl.evaluateAll()"]
     H --> L
-    L --> M[Capture context]
-    L --> N[Chia flag thành batch]
-    N --> O[Đánh giá root + parent + strategies]
-    O --> P[Map flagName -> Boolean]
-    P --> Q[AuthRes.features]
+    L --> M["Capture context"]
+    L --> N["Submit từng flag thành task có giới hạn"]
+    N --> O["Đánh giá root, parent và strategies"]
+    O --> P["Map flagName thành Boolean"]
+    P --> Q["AuthRes.features"]
 
-    R[Order endpoint] --> S[@RequireFeature hoặc isEnabled]
-    S --> T[FeatureFlagAspect / FeatureFlagClient]
-    T --> L2[FeatureFlagConfigServiceImpl.isEnabled]
+    R["Order endpoint"] --> S["@RequireFeature hoặc isEnabled()"]
+    S --> T["FeatureFlagAspect / FeatureFlagClient"]
+    T --> L2["FeatureFlagConfigServiceImpl.isEnabled()"]
     H --> L2
-    L2 --> U[Cho chạy nghiệp vụ hoặc ném FeatureFlagDisabledException]
+    L2 --> U["Cho chạy nghiệp vụ hoặc ném FeatureFlagDisabledException"]
 ```
 
 ### 1.1 Khởi tạo thư viện
@@ -45,7 +45,7 @@ AuthController.login/refresh/getMe
   -> FeatureFlagClient.evaluateAll()
   -> FeatureFlagConfigService.evaluateAll()
   -> FeatureFlagConfigServiceImpl.evaluateAll()
-  -> context + cache snapshot + batch tasks
+  -> capture context + submit từng flag có giới hạn vào executor
   -> evaluateConfig -> evaluateSingleStrategy -> EvaluationStrategy.evaluate
   -> Map<String, Boolean>
   -> AuthRes.features
@@ -114,7 +114,7 @@ Vì vậy, bảng cần đối chiếu sau Apply là `feature_flag_configs` tron
 
 | Điểm gọi / hàm | Gọi tiếp | Ý nghĩa |
 |---|---|---|
-| `FeatureFlagAutoConfiguration.featureFlagExecutor(properties)` | tạo `ThreadPoolTaskExecutor` bean `featureFlagExecutor` | Tạo pool riêng cho `evaluateAll`, bind thông số từ `feature-flag.executor.*`; handler dùng caller thread làm backpressure khi pool đầy. |
+| `FeatureFlagAutoConfiguration.featureFlagExecutor(properties)` | tạo `ThreadPoolTaskExecutor` bean `featureFlagExecutor` | Tạo pool riêng cho evaluateAll; queue hữu hạn và CallerRuns tạo backpressure khi pool đầy. |
 | `FeatureFlagConfigServiceImpl.initCache()` | `refreshCache()` | Nạp cấu hình local vào RAM khi ứng dụng khởi động. |
 | `InternalFeatureFlagController.syncFile(...)` | `InternalFeatureFlagServiceImpl.syncSnapshotFile(...)` | HTTP multipart endpoint nhận file snapshot nội bộ. |
 | `InternalFeatureFlagServiceImpl.syncSnapshotFile(token,file)` | `validateToken`, parse JSON, `FeatureFlagClient.syncSnapshot` | Xác thực internal token, parse snapshot, trả số dòng đã sync. |
@@ -122,7 +122,7 @@ Vì vậy, bảng cần đối chiếu sau Apply là `feature_flag_configs` tron
 | `FeatureFlagConfigServiceImpl.syncSnapshot(request)` | repository save/delete, `refreshCache()` | Cập nhật DB local và RAM từ snapshot. |
 | `AuthServiceImpl.login/refresh/getMe` | `FeatureFlagClient.evaluateAll()` | Tạo map cờ phù hợp context của lần gọi hiện tại để đưa vào `AuthRes`. |
 | `FeatureFlagClient.evaluateAll()` | `FeatureFlagConfigService.evaluateAll()` | Facade; nếu gặp `RuntimeException`, log và fallback về map rỗng. |
-| `FeatureFlagConfigServiceImpl.evaluateAll()` | `captureContext`, cache, batch, `evaluateConfig` | Đánh giá tất cả flag; trả map `flagName -> enabled`. |
+| `FeatureFlagConfigServiceImpl.evaluateAll()` | `captureContext`, cache snapshot, bounded `CompletionService`, `evaluateConfig` | Mỗi task đánh giá một flag; chỉ giữ tối đa `max-pending-tasks` task đang chạy/chờ; trả map sau khi toàn bộ flag xong. |
 | `FeatureFlagClient.isEnabled(name)` | `FeatureFlagConfigService.isEnabled(name)` | Facade cho code nghiệp vụ và AOP; lỗi runtime fallback về false. |
 | `FeatureFlagConfigServiceImpl.isEnabled(name)` | cache/Repo, `captureContext`, `evaluateConfig` | Đánh giá một flag theo context request hiện tại. |
 | `FeatureFlagAspect.checkFeatureFlag(joinPoint, annotation)` | gọi `FeatureFlagClient.isEnabled` cho từng tên | Chạy trước method `@RequireFeature`; false thì ném `FeatureFlagDisabledException`. |
@@ -131,16 +131,16 @@ Vì vậy, bảng cần đối chiếu sau Apply là `feature_flag_configs` tron
 
 | Hàm | Trách nhiệm |
 |---|---|
-| Constructor | Nhận repository, `ObjectMapper`, executor và danh sách strategy bean; đăng ký từng strategy theo các ID hỗ trợ vào `strategyMap`. |
+| Constructor | Nhận repository, `ObjectMapper`, executor, cấu hình giới hạn task và danh sách strategy bean; đăng ký từng strategy theo các ID hỗ trợ vào `strategyMap`. |
 | `initCache()` | Hook khởi động; gọi nạp cache. |
 | `refreshCache()` | Đọc tất cả config từ DB local; group theo tên viết hoa; dựng `flagCache` và `idCache`. |
 | `syncSnapshot(request)` | Upsert config theo tên flag, xóa tên bị loại khỏi snapshot, flush DB, refresh RAM; trả số config được lưu. |
 | `isEnabled(flagName)` | Chuẩn hóa tên; đọc cache; cache miss thì query `findByFlagNameIgnoreCase`; đánh giá các config có tên đó. |
-| `evaluateAll()` | Chụp context một lần, lấy snapshot cấu hình, chia batch theo `evaluationBatchSize`, tối đa `maxPendingBatches` future mỗi cửa sổ, chờ cửa sổ xong rồi tạo cửa sổ tiếp. |
+| `evaluateAll()` | Chụp context một lần, copy map cấu hình trong RAM, submit từng flag vào `CompletionService` theo cửa sổ giới hạn; worker đánh giá `anyMatch` cho flag đó; request thu kết quả hoàn tất và submit flag tiếp theo. |
 | `evaluateConfig(config, context, visited)` | Kiểm tra config có tồn tại và `enabled`; kiểm tra parent; nếu không có rule thì bật; nếu có thì áp dụng AND/OR. Bắt lỗi và mặc định false. |
 | `isParentActive(parentId, context, visited)` | Tìm parent trong `idCache`, đệ quy đánh giá parent, phát hiện vòng lặp bằng `visited`. |
 | `evaluateSingleStrategy(id, params, context)` | Tìm implementation trong `strategyMap`; strategy không biết ID thì false. |
-| `captureContext()` | Ghép username, authorities và client IP thành `EvaluationContext` trước khi chuyển batch sang worker. |
+| `captureContext()` | Ghép username, authorities và client IP thành `EvaluationContext` một lần trên request thread trước khi task chuyển sang worker. |
 | `getCurrentUsername()` | Đọc tên user từ `SecurityContextHolder`; anonymous/chưa authenticated thì null. |
 | `getCurrentAuthorities()` | Đọc danh sách quyền từ Authentication. |
 | `resolveClientIp()` | Đọc `X-Forwarded-For` đầu tiên hoặc remote address. |
@@ -174,7 +174,7 @@ Vì vậy, bảng cần đối chiếu sau Apply là `feature_flag_configs` tron
 
 `EvaluationStrategy.getSupportedStrategyIds()` khai báo alias; `evaluate(params,context)` thực hiện điều kiện. Spring component scan tìm các implementation và constructor của service đăng ký chúng.
 
-## 7. Batch evaluation và cấu hình
+## 7. Đánh giá song song từng flag với giới hạn task
 
 `FeatureFlagExecutorProperties` bind từ prefix `feature-flag.executor`:
 
@@ -183,13 +183,20 @@ Vì vậy, bảng cần đối chiếu sau Apply là `feature_flag_configs` tron
 | `core-pool-size` | 4 | Thread pool giữ tối thiểu. |
 | `max-pool-size` | 8 | Mức pool có thể tăng đến khi queue đầy. |
 | `queue-capacity` | 16 | Task chờ trong queue trước khi tăng pool đến max. |
-| `evaluation-batch-size` | 100 | Số tên flag trong một task. |
-| `max-pending-batches` | 64 | Future tối đa mỗi cửa sổ của một lần `evaluateAll`. |
+| `max-pending-tasks` | 24 | Số future tối đa một lần `evaluateAll()` giữ đang chạy/chờ; khi một task hoàn tất, submit flag tiếp theo. |
 | `thread-name-prefix` | `ff-eval-` | Prefix thread trong log/diagnostic. |
 | `wait-for-tasks-to-complete-on-shutdown` | true | Chờ task đang chạy lúc shutdown. |
 | `await-termination-seconds` | 10 | Giới hạn chờ shutdown. |
 
-Với 5.000 tên flag và batch 100: khoảng 50 task. Các task vẫn chạy song song; bên trong từng task các flag chạy tuần tự. `CompletableFuture.allOf(...).join()` chặn thread request cho đến khi đủ map trả login; worker được trả pool sau khi xong batch. Pool đầy thì producer chạy batch trên thread submit (backpressure), không thả task; vì thế latency request có thể tăng dưới tải.
+Với 5.000 tên flag, thư viện có 5.000 lượt đánh giá nhưng không gửi 5.000 task cùng lúc. Mỗi task đánh giá đúng một flag. Khi task xong, worker quay về pool; `evaluateAll()` nhận kết quả hoàn tất rồi gửi flag kế tiếp để giữ số task trong giới hạn. `CompletionService.take()` chờ ở request thread nếu chưa có kết quả; worker không chờ các worker khác.
+
+Luồng mỗi lần gọi: chụp context một lần trên request thread; copy map cache để evaluation có snapshot tên/config ổn định; submit tối đa `max-pending-tasks`; nhận một task hoàn tất; ghi kết quả vào map; submit flag tiếp theo; lặp đến khi xong tất cả. Map trả cho login vẫn là map đầy đủ, nên request phải đợi kết quả cuối cùng. Không dùng `CompletableFuture.allOf(...).join()`; completion được thuần dần qua `CompletionService`.
+
+Độ phức tạp cơ bản là O(F + R), với F là số tên flag và R là số rule/strategy thực sự được thăm (có short-circuit). Quan hệ cha có thể khiến cùng parent được đánh giá lại cho nhiều flag con. Số 5.000 dòng DB chỉ đồng nghĩa 5.000 lượt task nếu chúng là 5.000 tên flag khác nhau; nếu một tên có nhiều config, cache nhóm chúng vào cùng một task.
+
+`refreshCache()` parse trước chuỗi strategies JSON thành `parsedStrategies` khi nạp từ DB. Khi đánh giá, `evaluateConfig()` dùng danh sách đã parse, sau đó áp dụng enabled, parent và AND/OR strategy. Đây là tối ưu parse, không phải kết quả evaluation cache: mỗi lần login vẫn đánh giá lại theo user/request context mới.
+
+Queue của executor là giới hạn dùng chung giữa các request. Khi queue đầy, pool mới tăng từ core đến max; nếu pool và queue đều đầy, handler `CallerRuns` chạy task trên thread submit để tạo backpressure. Vì vậy request có thể tự xử lý một flag khi hệ thống quá tải, nhưng công việc không bị loại bỏ.
 
 ## 8. DTO/entity/repository: dữ liệu mang qua các tầng
 
@@ -216,4 +223,4 @@ Với 5.000 tên flag và batch 100: khoảng 50 task. Các task vẫn chạy so
 - Login và refresh gọi `evaluateAll()` lại; đổi config cần tới tracking-order qua snapshot trước để cache config của instance được làm mới.
 - Nếu có nhiều replica tracking-order, mỗi replica cần nhận snapshot; nếu không, các instance có thể trả trạng thái khác nhau.
 - Source `feature-flag-lib` có strategy implementation động theo `strategyId`; enum của `feature-flag-service` là vấn đề riêng và không phải enum trong thư viện này.
-- `FeatureFlagConfig.parsedStrategies` được khai báo transient nhưng luồng evaluation hiện parse từ JSON qua `parseStrategies`; đừng trình bày nó như cache parse đang được sử dụng.
+- `FeatureFlagConfig.parsedStrategies` được khai báo transient và được `refreshCache()` điền trước; `evaluateConfig()` ưu tiên dùng danh sách này để tránh parse JSON lại trên mỗi lần đánh giá.
