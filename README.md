@@ -1,236 +1,51 @@
-# Thư Viện Feature Flag (feature-flag-lib)
+# feature-flag-lib
 
-> **Thư viện dùng chung (In-house Shared Library)** cung cấp giải pháp quản lý, đồng bộ và đánh giá cờ tính năng (Feature Flag) cục bộ, hiệu năng cao, an toàn cho hệ thống Microservices.
-
----
+> Thư viện Spring Boot dùng chung để nhận snapshot feature flag, lưu cấu hình vào DB cục bộ, cache trong RAM và đánh giá flag theo request.
 
 ## Mục lục
-1. [Giới thiệu tổng quan](#1-giới-thiệu-tổng-quan)
-2. [Kiến trúc & Công nghệ sử dụng](#2-kiến-trúc--công-nghệ-sử-dụng)
-3. [Cấu trúc thư mục (Package Structure)](#3-cấu-trúc-thư-mục-package-structure)
-4. [Mô hình Database & Entity](#4-mô-hình-database--entity)
-5. [Các Phương thức SDK & Annotation](#5-các-phương-thức-sdk--annotation)
-6. [Hướng dẫn cài đặt & Tích hợp vào Microservice](#6-hướng-dẫn-cài-đặt--tích-hợp-vào-microservice)
-7. [Hướng dẫn sử dụng thực tế](#7-hướng-dẫn-sử-dụng-thực-tế)
-8. [Trạng thái phát triển & Ghi chú/TODO](#8-trạng-thái-phát-triển--ghi-chútodo)
 
----
+1. [Luồng tổng quan](#1-luồng-tổng-quan)
+2. [Yêu cầu và cài đặt](#2-yêu-cầu-và-cài-đặt)
+3. [Cấu hình ứng dụng tiêu thụ](#3-cấu-hình-ứng-dụng-tiêu-thụ)
+4. [Sử dụng FeatureFlagClient](#4-sử-dụng-featureflagclient)
+5. [Dùng @RequireFeature](#5-dùng-requirefeature)
+6. [Đồng bộ snapshot](#6-đồng-bộ-snapshot)
+7. [Cách đánh giá flag](#7-cách-đánh-giá-flag)
+8. [Thread pool của evaluateAll()](#8-thread-pool-của-evaluateall)
+9. [Cấu trúc dữ liệu và lưu ý vận hành](#9-cấu-trúc-dữ-liệu-và-lưu-ý-vận-hành)
 
-## 1. Giới thiệu tổng quan
+## 1. Luồng tổng quan
 
-### 1.1. Tên dự án & Tọa độ Maven
-* **GroupId**: `com.example`
-* **ArtifactId**: `feature-flag-lib`
-* **Phiên bản hiện tại**: `1.0.0`
-* **Định dạng đóng gói**: `jar`
+Thư viện không gọi `feature-flag-service` mỗi lần kiểm tra flag. Service quản lý/admin gửi snapshot tới ứng dụng tiêu thụ; thư viện lưu snapshot trong DB của ứng dụng đó và đưa cấu hình vào cache RAM.
 
-### 1.2. Mục đích & Bài toán giải quyết
-Trong kiến trúc Microservices, việc bật/tắt tính năng (Feature Toggle / Canary Release / A/B Testing) thường gặp các vấn đề:
-1. **Độ trễ mạng (Network Latency) & Điểm nghẽn (Single Point of Failure)**: Nếu mỗi lần kiểm tra cờ đều phải gọi HTTP sang service trung tâm thì khi service trung tâm gặp sự cố hoặc quá tải, toàn bộ microservices khác sẽ bị chậm hoặc tê liệt.
-2. **Chi phí I/O Database**: Khi kiểm tra cờ ở các luồng nóng (như mua hàng, đặt đơn, login), việc query database liên tục sẽ gây nghẽn kết nối DB.
-3. **Mất ngữ cảnh bảo mật trong môi trường đa luồng**: Khi đánh giá cờ song song qua ThreadPool, các thông tin trong `ThreadLocal` (`SecurityContextHolder`, `RequestContextHolder`) thường bị mất dẫn đến đánh giá sai (bị xem là anonymous user).
+```mermaid
+flowchart LR
+    A[Admin Apply snapshot] --> B[Ứng dụng tiêu thụ nhận FeatureFlagSyncRequest]
+    B --> C[FeatureFlagClient.syncSnapshot]
+    C --> D[FeatureFlagConfigServiceImpl.syncSnapshot]
+    D --> E[(DB cục bộ: feature_flag_configs)]
+    D --> F[refreshCache: flagCache + idCache]
 
-**`feature-flag-lib` giải quyết triệt để các bài toán trên bằng cách:**
-* **Kiến trúc Local Snapshot**: Lưu cấu hình cờ trực tiếp vào Database của từng microservice, tự động đồng bộ khi có thay đổi từ Admin.
-* **In-Memory Cache (RAM)**: Lưu trữ cờ trực tiếp trên bộ nhớ RAM, phục vụ các lệnh kiểm tra với tốc độ $O(1)$ (< 0.001ms), hoàn toàn không query Database trên luồng nóng.
-* **Mô hình Concurrency & Context Snapshotting**: Tận dụng Spring `ThreadPoolTaskExecutor` để đánh giá song song toàn bộ cờ cho user khi login, đồng thời chụp ảnh ngữ cảnh (Snapshot) từ luồng cha sang luồng con an toàn 100%.
-* **Strategy Pattern chuẩn OCP**: Tách độc lập từng loại chiến lược đánh giá (User, Role, IP, Release Date, Rollout) giúp dễ dàng mở rộng không giới hạn.
-* **Lập trình phòng vệ (Fail-safe Fallback)**: Cổng `FeatureFlagClient` tự động bắt mọi lỗi ngoại lệ và fallback về `false`, đảm bảo nghiệp vụ chính của microservice không bao giờ bị gián đoạn.
+    G[Login / refresh token] --> H[FeatureFlagClient.evaluateAll]
+    H --> I[captureContext trên request thread]
+    I --> J[Submit từng flag vào ThreadPool]
+    J --> K[Map flagName -> Boolean]
 
-### 1.3. Các thành phần thực tế có trong thư viện
-* **Annotation**: `@EnableFeatureFlag` (kích hoạt lib), `@RequireFeature` (chặn AOP method).
-* **Aspect**: `FeatureFlagAspect` (AOP interceptor kiểm tra cờ trước khi chạy method).
-* **Client / Facade**: `FeatureFlagClient` (điểm tiếp xúc an toàn cho lập trình viên ứng dụng).
-* **Auto-Configuration**: `FeatureFlagAutoConfiguration` (cung cấp ThreadPool và tự động quét Bean).
-* **Core Service**: `FeatureFlagConfigService` & `FeatureFlagConfigServiceImpl`.
-* **Strategy Engine**: Interface `EvaluationStrategy`, record `EvaluationContext`, và 5 strategy cụ thể: `UsernameStrategy`, `UserRoleStrategy`, `ClientIpStrategy`, `ReleaseDateStrategy`, `GradualRolloutStrategy`.
-* **Data Access**: `FeatureFlagConfigRepo` và Entity `FeatureFlagConfig`, `BaseEntity`.
-* **DTO**: `FeatureFlagSyncRequest`, `FeatureFlagSyncItem`, `StrategyItemSync`.
-* **Exception**: `FeatureFlagDisabledException`.
-
----
-
-## 2. Kiến trúc & Công nghệ sử dụng
-
-### 2.1. Ngăn xếp công nghệ (Technology Stack)
-* **Java**: `21` (sử dụng các tính năng hiện đại: `record`, Pattern Matching for `switch`, Virtual Thread ready).
-* **Spring Boot Framework**: `3.4.0`
-  * `spring-boot-starter-aop`: Hỗ trợ AspectJ interceptor cho `@RequireFeature`.
-  * `spring-boot-starter-data-jpa`: Tương tác Hibernate/JPA lưu snapshot vào DB.
-  * `spring-boot-starter-web`: Cung cấp `RequestContextHolder` và `HttpServletRequest`.
-  * `spring-boot-autoconfigure`: Cơ chế Spring Boot Starter nạp tự động.
-* **Spring Security Core**: `6.4.0` (Trích xuất `Authentication`, `Principal`, `GrantedAuthority` từ `SecurityContextHolder`).
-* **Jackson Databind**: `2.18.1` (Serialize / Deserialize JSON cấu hình các chiến lược).
-* **Lombok**: `1.18.30` (giảm boilerplate code).
-
-### 2.2. Kiến trúc phân tầng (Layered Architecture)
-
-```text
-┌────────────────────────────────────────────────────────────────────────┐
-│                        TẦNG GIAO TIẾP CÔNG KHAI                        │
-│   @RequireFeature (AOP Aspect)    │       FeatureFlagClient (Facade)   │
-└───────────────────────────────────┬────────────────────────────────────┘
-                                    │
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│                        TẦNG DỊCH VỤ CỐT LÕI                            │
-│                    FeatureFlagConfigServiceImpl                        │
-│   ├── In-Memory Cache (ConcurrentHashMap - Tốc độ O(1))                │
-│   ├── Context Snapshot Engine (Capture Username, Roles, Client IP)     │
-│   └── ThreadPoolTaskExecutor (ff-eval-1, ff-eval-2: Đánh giá song song)│
-└──────────────┬──────────────────────────────────────────┬──────────────┘
-               │                                          │
-               ▼                                          ▼
-┌───────────────────────────────┐          ┌─────────────────────────────┐
-│    STRATEGY PATTERN ENGINE    │          │     DATABASE & PERSISTENCE  │
-│  ├── UsernameStrategy         │          │  ├── FeatureFlagConfigRepo  │
-│  ├── UserRoleStrategy         │          │  ├── FeatureFlagConfig (JPA)│
-│  ├── ClientIpStrategy         │          │  └── BaseEntity (Auditing)  │
-│  ├── ReleaseDateStrategy      │          └─────────────────────────────┘
-│  └── GradualRolloutStrategy   │
-└───────────────────────────────┘
+    L[Endpoint nghiệp vụ] --> M[FeatureFlagClient.isEnabled hoặc @RequireFeature]
+    M --> N[Cache RAM + evaluateConfig]
+    N --> O[Cho chạy hoặc chặn nghiệp vụ]
 ```
 
-### 2.3. Cơ chế trích xuất ngữ cảnh (Context Extraction)
-Thư viện tự động phân tích ngữ cảnh người dùng đang thực hiện request:
-1. **User Identity & Roles**: 
-   - Đọc từ `SecurityContextHolder.getContext().getAuthentication()`.
-   - Nhận diện `auth.getName()` và danh sách `GrantedAuthority`.
-   - Tự động bỏ qua nếu là `anonymousUser` hoặc chưa đăng nhập.
-2. **Client IP Address**: 
-   - Đọc từ `RequestContextHolder.getRequestAttributes()`.
-   - Ưu tiên header `X-Forwarded-For` (nếu hệ thống nằm sau Nginx / API Gateway / Cloudflare).
-   - Tự động fallback về `request.getRemoteAddr()`.
-   - **Chuẩn hóa Network qua `InetAddress`**: Tự động chuyển đổi các địa chỉ loopback IPv6 (`0:0:0:0:0:0:0:1` hoặc `::1`) về chuẩn `127.0.0.1`, bóc tách tiền tố IPv4-mapped IPv6 (`::ffff:x.x.x.x`).
+Khi ứng dụng khởi động, `@PostConstruct initCache()` gọi `refreshCache()` để nạp DB local vào RAM. Sau khi ghi snapshot, `syncSnapshot()` cũng gọi `refreshCache()`. Hàm refresh tự bắt và log lỗi; nếu refresh gặp lỗi đọc DB hoặc parse cấu hình thì cache có thể chưa phản ánh snapshot mới, nên cần kiểm tra log đồng bộ.
 
----
+## 2. Yêu cầu và cài đặt
 
-## 3. Cấu trúc thư mục (Package Structure)
+- Java 21+
+- Spring Boot 3.x (thư viện hiện khai báo Spring Boot 3.4.0)
+- Ứng dụng tiêu thụ cần cấu hình datasource/JPA và một cơ sở dữ liệu được Hibernate hỗ trợ. Cột `strategies` được ánh xạ dạng JSON; ví dụ triển khai hiện dùng MySQL.
 
-```text
-com.example.featureflag
-├── annotation
-│   ├── EnableFeatureFlag.java          # Annotation kích hoạt thư viện thủ công
-│   └── RequireFeature.java             # Annotation gắn trên Method để kiểm tra cờ
-├── aspect
-│   └── FeatureFlagAspect.java          # Interceptor AOP chặn trước method @RequireFeature
-├── client
-│   └── FeatureFlagClient.java          # Facade công khai, xử lý Fail-safe fallback
-├── config
-│   └── FeatureFlagAutoConfiguration.java # Tự động cấu hình Spring Boot & ThreadPoolTaskExecutor
-├── dto
-│   ├── FeatureFlagSyncItem.java        # DTO thông tin 1 cờ trong snapshot
-│   ├── FeatureFlagSyncRequest.java     # DTO gói snapshot đồng bộ từ server trung tâm
-│   └── StrategyItemSync.java           # DTO cấu hình từng chiến lược con
-├── entity
-│   ├── BaseEntity.java                 # MappedSuperclass chứa audit (created_at, updated_at, deleted)
-│   └── FeatureFlagConfig.java          # Entity JPA bảng feature_flag_configs
-├── exception
-│   └── FeatureFlagDisabledException.java # Ngoại lệ ném ra khi cờ bị tắt (HTTP 400)
-├── repository
-│   └── FeatureFlagConfigRepo.java      # JpaRepository truy vấn DB cục bộ
-├── service
-│   ├── FeatureFlagConfigService.java   # Interface nghiệp vụ cấu hình cờ
-│   └── impl
-│       └── FeatureFlagConfigServiceImpl.java # Triển khai Cache RAM, ThreadPool và Snapshot Context
-└── strategy
-    ├── EvaluationContext.java          # Record chứa snapshot: username, authorities, clientIp
-    ├── EvaluationStrategy.java         # Interface chuẩn Strategy Pattern
-    └── impl
-        ├── ClientIpStrategy.java       # Chiến lược IP Whitelist
-        ├── GradualRolloutStrategy.java # Chiến lược Gradual Rollout theo %
-        ├── ReleaseDateStrategy.java    # Chiến lược mở cờ theo ngày giờ
-        ├── UserRoleStrategy.java       # Chiến lược theo vai trò người dùng (Role)
-        └── UsernameStrategy.java       # Chiến lược theo tài khoản người dùng (User Whitelist)
-```
+Tọa độ Maven trong `pom.xml`:
 
----
-
-## 4. Mô hình Database & Entity
-
-Thư viện sử dụng cơ chế JPA Entity để lưu snapshot cấu hình cờ vào Database của service tiêu thụ.
-
-### Bảng: `feature_flag_configs`
-
-| Tên Cột | Kiểu Dữ Liệu | Khóa | Ràng buộc | Mô Tả |
-| :--- | :--- | :---: | :---: | :--- |
-| `id` | `VARCHAR(36)` | **PK** | NOT NULL | UUID định danh ngẫu nhiên (sinh tự động qua `@UuidGenerator`) |
-| `flag_name` | `VARCHAR(100)` | Index | NOT NULL | Tên định danh của cờ (viết hoa, ví dụ: `BUY_NOW`, `ORDER_DETAIL`) |
-| `enabled` | `BOOLEAN` | | NOT NULL | Công tắc tổng (Master Switch): `true` = BẬT, `false` = TẮT |
-| `strategies` | `JSON` | | NULL | Chuỗi JSON chứa mảng các chiến lược đánh giá chi tiết |
-| `strategy_logic` | `VARCHAR(3)` | | NULL | Logic kết hợp các chiến lược: `"AND"` hoặc `"OR"` (mặc định `"OR"`) |
-| `applied_version` | `VARCHAR(100)` | | NOT NULL | Phiên bản snapshot được áp dụng (ví dụ: `v-1727251234567`) |
-| `create_at` | `DATETIME` | | NULL | Thời điểm tạo bản ghi (Audit từ `BaseEntity`) |
-| `update_at` | `DATETIME` | | NULL | Thời điểm cập nhật bản ghi (Audit từ `BaseEntity`) |
-| `created_by` | `VARCHAR(255)` | | NULL | Người tạo bản ghi |
-| `updated_by` | `VARCHAR(255)` | | NULL | Người cập nhật bản ghi |
-| `deleted` | `BOOLEAN` | | NOT NULL | Cờ xóa mềm (Soft-delete): `false` = hoạt động, `true` = đã xóa |
-
-* **Index**: `@Index(name = "idx_feature_flag_name", columnList = "flag_name")` giúp tăng tốc truy vấn khi khởi động nạp cache.
-
----
-
-## 5. Các Phương thức SDK & Annotation
-
-Vì đây là thư viện dùng chung (Shared Library), thư viện cung cấp các phương thức SDK thông qua `FeatureFlagClient` và Annotation `@RequireFeature`:
-
-### 5.1. Annotation `@RequireFeature`
-Dùng để bảo vệ trực tiếp method (Controller endpoint hoặc Service method):
-
-| Thuộc tính | Kiểu | Mặc định | Ý nghĩa |
-| :--- | :--- | :--- | :--- |
-| `features` | `String[]` | `{}` | Mảng tên các cờ cần kiểm tra. Tất cả cờ trong mảng phải BẬT thì method mới được chạy. |
-| `message` | `String` | `"Tính năng đang bảo trì"` | Thông báo lỗi trả về cho client nếu cờ bị tắt. |
-
-* **Hành vi khi cờ TẮT**: `FeatureFlagAspect` lập tức ném ra ngoại lệ `FeatureFlagDisabledException` (HTTP Status: `400 BAD REQUEST`) chứa `message` cấu hình.
-
-### 5.2. Public SDK `FeatureFlagClient`
-
-| Phương thức | Tham số | Giá trị trả về | Hành vi phòng vệ (Fail-safe) |
-| :--- | :--- | :--- | :--- |
-| `isEnabled(String flagName)` | `flagName`: Tên cờ cần kiểm tra | `boolean` (`true`/`false`) | Nếu có lỗi DB/Runtime, tự động bắt lỗi và trả về `false` (an toàn). Đọc trực tiếp từ In-Memory Cache. |
-| `evaluateAll()` | Không có | `Map<String, Boolean>` | Đánh giá toàn bộ cờ cho user session hiện tại qua ThreadPool. Nếu lỗi, trả về `Collections.emptyMap()`. |
-| `syncSnapshot(FeatureFlagSyncRequest request)` | DTO snapshot từ Admin | `int` (số lượng cờ đã đồng bộ) | Ghi đè snapshot mới vào DB và làm mới In-Memory Cache ngay lập tức. |
-
----
-
-## 6. Hướng dẫn cài đặt & Tích hợp vào Microservice
-
-### Cấu hình thread pool đánh giá cờ
-
-Ứng dụng import thư viện có thể ghi đè executor dùng bởi `evaluateAll()` trong `application.yml`:
-
-```yaml
-feature-flag:
-  executor:
-    core-pool-size: 4
-    max-pool-size: 16
-    queue-capacity: 16
-    max-pending-tasks: 24
-    thread-name-prefix: ff-eval-
-    wait-for-tasks-to-complete-on-shutdown: true
-    await-termination-seconds: 10
-```
-
-Các giá trị mặc định lần lượt là `4`, `8`, `16`, `24`, `ff-eval-`, `true`, `10`. Mỗi task đánh giá một flag rồi hoàn tất để worker quay lại pool nhận task tiếp theo. `max-pending-tasks` giới hạn số task đang chạy/chờ được submit bởi một lần `evaluateAll()`; các task tiếp theo chỉ được submit khi có task hoàn tất. Với 5.000 flag, vẫn có 5.000 lượt đánh giá nhưng không giữ 5.000 future đang chờ cùng lúc. Queue hữu hạn cho pool cơ hội mở rộng từ core lên max; khi pool và queue đầy, backpressure chạy task trên thread submit thay vì từ chối. Ứng dụng cũng có thể khai báo bean tên `featureFlagExecutor` để thay thế hoàn toàn executor mặc định.
-
-Lưu ý: `spring.task.execution.pool.*` cấu hình executor mặc định của Spring Boot. Thư viện này dùng executor bean riêng tên `featureFlagExecutor`, nên cấu hình của nó nằm dưới `feature-flag.executor.*` như ví dụ trên.
-
-### 6.1. Yêu cầu môi trường
-* **JDK**: `21` trở lên.
-* **Build Tool**: Apache Maven `3.8+` (hoặc Maven Wrapper đi kèm dự án).
-* **Spring Boot**: `3.x` (đã kiểm thử tương thích tốt trên `3.4.0`).
-* **Database**: MySQL `8.0+` (hoặc các hệ quản trị CSDL hỗ trợ kiểu cột `JSON`).
-
-### 6.2. Các bước đóng gói & Cài đặt vào kho Maven Local
-Mở terminal tại thư mục chứa mã nguồn `feature-flag-lib`:
-```bash
-mvn clean install -DskipTests
-```
-Lệnh này sẽ biên dịch, đóng gói file `feature-flag-lib-1.0.0.jar` và cài đặt vào thư mục `~/.m2/repository/com/example/feature-flag-lib/1.0.0/`.
-
-### 6.3. Khai báo Dependency trong Microservice tiêu thụ
-Thêm khối dependency sau vào file `pom.xml` của microservice (ví dụ `tracking-order`):
 ```xml
 <dependency>
     <groupId>com.example</groupId>
@@ -239,11 +54,24 @@ Thêm khối dependency sau vào file `pom.xml` của microservice (ví dụ `tr
 </dependency>
 ```
 
-*(Tùy chọn: Nếu microservice build qua Docker không dùng chung cache `.m2`, có thể copy file `feature-flag-lib-1.0.0.jar` vào thư mục `libs/` của project và chạy `install:install-file` trong Dockerfile).*
+Build và cài vào Maven local:
 
-### 6.4. Kích hoạt thư viện
-Thư viện hỗ trợ **Spring Boot Auto-configuration**. Bạn chỉ cần import dependency là thư viện sẽ tự động kích hoạt.
-Hoặc bạn có thể gắn `@EnableFeatureFlag` trên Application class chính để tường minh:
+```powershell
+.\mvnw.cmd clean install
+```
+
+Hoặc nếu máy đã cài Maven:
+
+```bash
+mvn clean install
+```
+
+Nếu ứng dụng build trong Docker và không dùng chung Maven local, đưa JAR vào build context của ứng dụng rồi cài JAR vào Maven local trong Dockerfile. Sau khi cập nhật thư viện, cần thay JAR mà ứng dụng tiêu thụ đang dùng và build lại ứng dụng/image.
+
+## 3. Cấu hình ứng dụng tiêu thụ
+
+Auto-configuration được đăng ký tại `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`. Thông thường chỉ cần thêm dependency. `@EnableFeatureFlag` có thể dùng để import cấu hình một cách tường minh nếu ứng dụng cần.
+
 ```java
 @SpringBootApplication
 @EnableFeatureFlag
@@ -254,201 +82,205 @@ public class TrackingOrderApplication {
 }
 ```
 
----
+Ứng dụng phải cấu hình datasource kết nối tới **DB cục bộ của chính ứng dụng tiêu thụ**. Thư viện đăng ký entity/repository trong package của nó và dùng schema `feature_flag_configs`.
 
-## 7. Hướng dẫn sử dụng thực tế
+Ví dụ `application.yml`:
 
-### 7.1. Chặn API / Method bằng Annotation `@RequireFeature`
-Gắn annotation trực tiếp trên API Controller hoặc Service Method:
-```java
-@RestController
-@RequestMapping("/api/v1/orders")
-public class OrderController {
+```yaml
+spring:
+  datasource:
+    url: jdbc:mysql://localhost:3306/tracking_order?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true
+    username: root
+    password: change-me
+  jpa:
+    hibernate:
+      ddl-auto: update
 
-    // Chặn nếu cờ BUY_NOW bị TẮT
-    @PostMapping("/buy-now")
-    @RequireFeature(features = "BUY_NOW", message = "Tính năng Mua Ngay đang bảo trì!")
-    public ResponseEntity<OrderRes> buyNow(@RequestBody OrderReq req) {
-        return ResponseEntity.ok(orderService.buyNow(req));
-    }
-
-    // Yêu cầu ĐỒNG THỜI cả 2 cờ ORDER_DETAIL và EXPORT_INVOICE phải BẬT
-    @GetMapping("/{id}")
-    @RequireFeature(features = {"ORDER_DETAIL", "EXPORT_INVOICE"})
-    public ResponseEntity<OrderDetailRes> getOrderDetail(@PathVariable String id) {
-        return ResponseEntity.ok(orderService.getDetail(id));
-    }
-}
+feature-flag:
+  executor:
+    core-pool-size: 4
+    max-pool-size: 8
+    queue-capacity: 16
+    max-pending-tasks: 24
+    thread-name-prefix: ff-eval-
+    wait-for-tasks-to-complete-on-shutdown: true
+    await-termination-seconds: 10
 ```
 
-### 7.2. Kiểm tra cờ thủ công trong mã nguồn Java
-Tiêm (Inject) `FeatureFlagClient` vào Service nghiệp vụ:
+`ddl-auto: update` chỉ là ví dụ cho môi trường phát triển. Môi trường triển khai có thể dùng migration/schema management riêng.
+
+## 4. Sử dụng FeatureFlagClient
+
+`FeatureFlagClient` là facade công khai để code ứng dụng kiểm tra flag.
+
+### Kiểm tra một flag
+
 ```java
 @Service
 @RequiredArgsConstructor
-@Slf4j
-public class OrderServiceImpl implements OrderService {
-
+public class OrderService {
     private final FeatureFlagClient featureFlagClient;
 
-    public void processPayment(Order order) {
-        // Kiểm tra cờ tăng giá
+    public void calculatePrice(Order order) {
         if (featureFlagClient.isEnabled("PRICE_INCREASE")) {
-            log.info("Áp dụng biểu phí mới theo chính sách Feature Flag");
             applyNewPricing(order);
         } else {
-            applyStandardPricing(order);
+            applyCurrentPricing(order);
         }
     }
 }
 ```
 
-### 7.3. Trả về toàn bộ cờ cho Frontend khi Đăng nhập (Auth Service)
-Khi người dùng đăng nhập thành công hoặc refresh token, gọi `evaluateAll()` để lấy trạng thái tất cả cờ trả về cho giao diện:
+`isEnabled(name)` trả `false` nếu flag không tồn tại hoặc facade gặp `RuntimeException`.
+
+### Lấy toàn bộ trạng thái flag
+
+Thường dùng lúc login/refresh token để đưa map vào response:
+
 ```java
-@Service
-@RequiredArgsConstructor
-public class AuthServiceImpl implements AuthService {
-
-    private final FeatureFlagClient featureFlagClient;
-
-    public AuthRes login(LoginReq req) {
-        // ... Xác thực tài khoản ...
-
-        // Đánh giá song song toàn bộ cờ cho User này (Tốc độ RAM, không nghẽn DB)
-        Map<String, Boolean> features = featureFlagClient.evaluateAll();
-
-        return AuthRes.builder()
-                .accessToken(accessToken)
-                .refreshToken(refreshToken)
-                .features(features) // Gửi kèm Map cờ để Frontend lưu vào LocalStorage/Redux
-                .build();
-    }
-}
+Map<String, Boolean> features = featureFlagClient.evaluateAll();
 ```
 
-### 7.4. Tạo Endpoint nhận đồng bộ Snapshot từ Central Admin
-Trong microservice tiêu thụ, tạo Controller nội bộ để nhận snapshot đẩy từ `admin-feature-flag-service`:
+`evaluateAll()` đánh giá theo context của request hiện tại và trả `Map<String, Boolean>`. Nếu có lỗi runtime thoát ra facade, facade log và trả map rỗng.
+
+### Đồng bộ snapshot
+
+```java
+int savedCount = featureFlagClient.syncSnapshot(snapshotRequest);
+```
+
+Thư viện cung cấp hàm nhận DTO và lưu snapshot; endpoint HTTP, bảo vệ token và việc parse file snapshot thuộc ứng dụng tiêu thụ/control-plane tích hợp với thư viện.
+
+## 5. Dùng @RequireFeature
+
+Gắn annotation lên method cần bảo vệ. Aspect gọi `FeatureFlagClient.isEnabled()` trước khi chạy method.
+
 ```java
 @RestController
-@RequestMapping("/api/v1/feature-flags")
-@RequiredArgsConstructor
-public class InternalFeatureFlagController {
+@RequestMapping("/api/orders")
+public class OrderController {
+    @PostMapping("/buy-now")
+    @RequireFeature(features = "BUY_NOW", message = "Tính năng Mua ngay đang bảo trì")
+    public OrderResponse buyNow(@RequestBody OrderRequest request) {
+        return orderService.buyNow(request);
+    }
 
-    private final FeatureFlagClient featureFlagClient;
-
-    @PostMapping("/sync")
-    public ResponseEntity<Map<String, Object>> syncSnapshot(
-            @RequestBody FeatureFlagSyncRequest request
-    ) {
-        int count = featureFlagClient.syncSnapshot(request);
-        return ResponseEntity.ok(Map.of(
-                "success", true,
-                "syncedFeatures", count,
-                "message", "Đã cập nhật snapshot và làm mới In-Memory Cache thành công"
-        ));
+    @GetMapping("/{id}/invoice")
+    @RequireFeature(features = {"ORDER_DETAIL", "EXPORT_INVOICE"})
+    public InvoiceResponse getInvoice(@PathVariable String id) {
+        return orderService.getInvoice(id);
     }
 }
 ```
 
-### 7.5. Xử lý Exception tập trung (`RestExceptionHandler`)
-Đăng ký handler để format lỗi trả về đẹp mắt khi dính `@RequireFeature`:
-```java
-@RestControllerAdvice
-public class GlobalExceptionHandler {
+Nếu danh sách có nhiều flag, **tất cả phải bật** thì method mới chạy. Khi có flag tắt, aspect ném `FeatureFlagDisabledException`; exception mang `HttpStatus.BAD_REQUEST` và message lấy từ annotation. Ứng dụng tiêu thụ cần exception handler phù hợp để ánh xạ exception thành HTTP response theo ý muốn.
 
-    @ExceptionHandler(FeatureFlagDisabledException.class)
-    public ResponseEntity<Map<String, Object>> handleFeatureDisabled(FeatureFlagDisabledException ex) {
-        return ResponseEntity.status(ex.getStatus()).body(Map.of(
-                "status", ex.getStatus().value(),
-                "error", "FEATURE_DISABLED",
-                "message", ex.getMessage()
-        ));
-    }
-}
-```
+## 6. Đồng bộ snapshot
 
----
+`FeatureFlagSyncRequest` có `version`, `exportedAt` và `features`. Mỗi `FeatureFlagSyncItem` có `id`, `flagName`, `enabled`, `parentId`, `strategyLogic`, `version` và `strategies`.
 
-### 7.6. Định dạng Snapshot JSON và 5 Loại Chiến lược hỗ trợ
+Luồng `syncSnapshot()`:
 
-Ví dụ payload snapshot được gửi từ Server Admin:
+1. Request null hoặc `features == null` thì bỏ qua và trả `0`. Một list rỗng không null là snapshot rỗng và sẽ loại các cấu hình hiện tại.
+2. Lấy version từ request; nếu trống thì tạo version dự phòng theo timestamp.
+3. Đọc cấu hình DB hiện tại và lập map theo tên flag chuẩn hóa.
+4. Với mỗi item hợp lệ, cập nhật entity hiện có hoặc tạo entity mới. Item null/không có tên flag được bỏ qua.
+5. Xóa config cũ không còn xuất hiện trong snapshot.
+6. `saveAll()` rồi `flush()` DB.
+7. `refreshCache()` nạp lại map RAM; hàm trả số entity đã đưa vào danh sách lưu.
+
+`syncSnapshot()` chạy trong transaction. Nếu thao tác lưu ném lỗi, transaction được rollback; lỗi được truyền cho caller (không bị facade `syncSnapshot()` đổi thành kết quả mặc định).
+
+## 7. Cách đánh giá flag
+
+### Một config
+
+`evaluateConfig()` kiểm tra theo thứ tự:
+
+1. `enabled` phải là `true`, nếu không trả `false`.
+2. Nếu có `parentId`, parent phải được tìm thấy trong `idCache`, đang bật và không tạo chu trình cha-con.
+3. Nếu không có strategy, config bật cho mọi context.
+4. Nếu có strategy, `AND` yêu cầu tất cả strategy đúng; `OR` hoặc logic mặc định yêu cầu ít nhất một strategy đúng.
+5. Strategy ID được tra trong `strategyMap`. ID không được hỗ trợ trả `false`.
+
+Lỗi khi đánh giá config được bắt và config đó trả `false`. Nếu nhiều config có cùng flag name, `flagCache` giữ chúng thành list và `anyMatch` khiến một config đúng là đủ để tên flag trả `true`. Thiết kế nghiệp vụ dự kiến tên flag là duy nhất; quan hệ cha như `BUY` → `BUY_NOW` dùng `parentId`, không phải tên bị trùng.
+
+### Strategy có sẵn
+
+| Strategy | ID hỗ trợ | Params được đọc |
+|---|---|---|
+| Username whitelist | `username`, `users_by_name` | `users` hoặc `value`; tên phân tách bằng dấu phẩy/khoảng trắng |
+| Role/authority | `user-role`, `user_role`, `role` | `roles`, `role` hoặc `value`; hỗ trợ authority có prefix `ROLE_` |
+| Client IP whitelist | `remote-client-ip`, `ip_whitelist`, `ip` | `ips` hoặc `value` |
+| Release date | `release-date`, `release_date` | `date`, `releaseDate` hoặc `value`; hỗ trợ ngày hoặc datetime |
+| Gradual rollout | `gradual-rollout`, `gradual_rollout`, `gradual_rollout_user_id`, `rollout` | `percentage` hoặc `value`; hash username, fallback sang IP |
+
+Strategy JSON mẫu:
+
 ```json
-{
-  "version": "v-20260925-1",
-  "exportedAt": "2026-09-25T15:00:00Z",
-  "features": [
-    {
-      "flagName": "BUY_NOW",
-      "enabled": true,
-      "strategyLogic": "OR",
-      "strategies": [
-        {
-          "strategyId": "username",
-          "params": {
-            "users": "admin, tester_01, vip_buyer"
-          }
-        },
-        {
-          "strategyId": "user_role",
-          "params": {
-            "roles": "BUYER, MANAGER"
-          }
-        }
-      ]
-    },
-    {
-      "flagName": "NEW_CHECKOUT_FLOW",
-      "enabled": true,
-      "strategyLogic": "AND",
-      "strategies": [
-        {
-          "strategyId": "remote-client-ip",
-          "params": {
-            "ips": "127.0.0.1, 192.168.1.100, 10.0.0.1"
-          }
-        },
-        {
-          "strategyId": "release-date",
-          "params": {
-            "date": "2026-09-01 00:00:00"
-          }
-        },
-        {
-          "strategyId": "gradual-rollout",
-          "params": {
-            "percentage": "30"
-          }
-        }
-      ]
-    }
-  ]
-}
+[
+  {
+    "strategyId": "user_role",
+    "params": { "roles": "ROLE_BUYER" }
+  },
+  {
+    "strategyId": "users_by_name",
+    "params": { "users": "alice,bob" }
+  }
+]
 ```
 
-#### Bảng tóm tắt 5 loại chiến lược tích hợp sẵn:
-| STT | Tên Chiến Lược | Strategy IDs hỗ trợ | Tham số cấu hình (`params`) | Cơ chế hoạt động |
-| :-: | :--- | :--- | :--- | :--- |
-| **1** | **User Whitelist** | `username`, `users_by_name` | `users` hoặc `value` (phân tách dấu phẩy) | Bật nếu `SecurityContext.username` khớp với danh sách. |
-| **2** | **Role Based** | `user-role`, `user_role`, `role` | `roles` hoặc `role` hoặc `value` | Bật nếu User có quyền khớp (hỗ trợ cả prefix `ROLE_`). |
-| **3** | **IP Whitelist** | `remote-client-ip`, `ip_whitelist`, `ip` | `ips` hoặc `value` | Đọc IP từ `X-Forwarded-For` / remoteAddr, chuẩn hóa qua `InetAddress`. |
-| **4** | **Release Date** | `release-date`, `release_date` | `date` hoặc `releaseDate` | Bật tự động nếu `LocalDateTime.now()` đã vượt mốc thời gian cấu hình. |
-| **5** | **Gradual Rollout** | `gradual-rollout`, `gradual_rollout`, `rollout` | `percentage` hoặc `value` (0 - 100) | Hash định danh `username` (hoặc `clientIp`) `% 100` để chia tỉ lệ nhất quán. |
+## 8. Thread pool của evaluateAll()
 
----
+Mỗi task đánh giá **một tên flag**. Task hoàn tất thì worker quay lại pool; không giữ worker để chạy cả batch 100 flag. `CompletionService` lấy task nào hoàn tất trước, request thread ghi kết quả vào map rồi submit flag tiếp theo.
 
-## 8. Trạng thái phát triển & Ghi chú/TODO
+```text
+5.000 tên flag, max-pending-tasks = 24
+submit tối đa 24 task → nhận task hoàn tất → ghi kết quả → submit flag tiếp theo
+                                               lặp đến khi map đủ 5.000 kết quả
+```
 
-### 8.1. Các tính năng đã hoàn thiện 100%
-- [x] Đóng gói chuẩn thư viện Spring Boot Auto-configuration.
-- [x] Hỗ trợ AOP `@RequireFeature` chặn method khai báo.
-- [x] Cung cấp Facade an toàn `FeatureFlagClient` với cơ chế Fallback phòng vệ.
-- [x] Tối ưu hóa In-Memory Cache (RAM) với `ConcurrentHashMap` đạt tốc độ $O(1)$.
-- [x] Tách 5 loại chiến lược theo **Strategy Pattern** độc lập, tuân thủ nguyên lý **OCP**.
-- [x] Cơ chế **Context Snapshotting** loại trừ hoàn toàn rủi ro mất `ThreadLocal` / `SecurityContext` trong luồng con.
-- [x] Song song hóa việc đánh giá toàn bộ cờ qua Spring `ThreadPoolTaskExecutor` (tiền tố `ff-eval-`).
-- [x] Chuẩn hóa Network IP bằng `InetAddress`, hỗ trợ xử lý Header `X-Forwarded-For` từ Load Balancer/Proxy.
+`max-pending-tasks` giới hạn task đang chạy/chờ được theo dõi bởi **một lần gọi** `evaluateAll()`. Nó không phải giới hạn toàn hệ thống; nhiều request login đồng thời có thể cùng submit task vào executor. Queue của executor và `CallerRuns` handler tạo giới hạn/backpressure dùng chung. Nếu pool và queue đầy, thread submit tự chạy task bị từ chối thay vì loại bỏ task.
 
-### 8.2. Ghi chú & Đề xuất nâng cấp (TODO)
-* **Xác thực bảo mật endpoint `/sync`**: Thư viện không áp đặt cơ chế bảo mật cho endpoint đồng bộ snapshot. Khi cài đặt Controller tiếp nhận tại các microservice, khuyến nghị lập trình viên thêm header secret token (ví dụ `X-Internal-Token`) hoặc tích hợp OAuth2/mTLS để ngăn chặn các request giả mạo.
-* **Hỗ trợ Multi-Replica Pods**: Hiện tại In-Memory Cache được cập nhật khi pod nhận request `/sync`. Nếu một microservice chạy nhiều replica pods nằm sau Load Balancer, cần đảm bảo request `/sync` được broadcast tới tất cả các pod (qua WebSocket / Redis Pub-Sub / Kafka) hoặc áp dụng TTL định kỳ gọi `refreshCache()`.
+Request vẫn phải đợi toàn bộ flag xong để trả map đầy đủ. Trong lúc đó `CompletionService.take()` làm request thread chờ kết quả; worker không chờ các worker khác. Luồng hiện tại không dùng batch và không gọi `CompletableFuture.join()`.
+
+| Property | Default | Ý nghĩa |
+|---|---:|---|
+| `core-pool-size` | `4` | Số worker lõi |
+| `max-pool-size` | `8` | Số worker tối đa; pool thường chỉ tăng quá core khi queue đầy |
+| `queue-capacity` | `16` | Số task có thể chờ trong queue |
+| `max-pending-tasks` | `24` | Số task một lần `evaluateAll()` submit/track đồng thời |
+| `thread-name-prefix` | `ff-eval-` | Prefix tên worker |
+| `wait-for-tasks-to-complete-on-shutdown` | `true` | Chờ task khi ứng dụng shutdown |
+| `await-termination-seconds` | `10` | Thời gian chờ tối đa khi shutdown |
+
+Các giá trị trên là mặc định/điểm bắt đầu, không phải cấu hình tối ưu cho mọi máy. Hãy benchmark p95/p99 login, CPU, heap, số request đồng thời, active threads và queue trước khi tuning. Nếu ứng dụng khai báo bean riêng tên `featureFlagExecutor`, bean đó thay thế executor mặc định và ứng dụng chịu trách nhiệm cấu hình hành vi từ chối task.
+
+## 9. Cấu trúc dữ liệu và lưu ý vận hành
+
+### Cache RAM
+
+- `flagCache`: tên flag chuẩn hóa → danh sách `FeatureFlagConfig`.
+- `idCache`: entity ID → `FeatureFlagConfig`, dùng tra parent.
+- `parsedStrategies`: danh sách strategy đã parse, là field `@Transient`, chỉ ở RAM.
+- Cache chứa **cấu hình**, không phải map kết quả đã cache theo user. Mỗi lần login/refresh gọi `evaluateAll()` sẽ đánh giá lại theo context hiện tại.
+
+Cache thuộc từng process. Nếu có nhiều instance, mỗi instance cần dùng dữ liệu DB đồng bộ và phải refresh cache tương ứng. Chỉ thấy flag trong DB của control-plane không chứng minh flag đã được Apply vào DB của service tiêu thụ.
+
+### Schema
+
+Entity ánh xạ bảng `feature_flag_configs` với các trường chính: `id`, `flag_name`, `enabled`, `parent_id`, `strategies` (JSON), `strategy_logic`, `applied_version` và audit fields từ `BaseEntity`. Có index trên `flag_name` và `parent_id`. Dữ liệu schema được Hibernate tạo/cập nhật theo cấu hình ứng dụng; thư viện không cung cấp migration tool riêng.
+
+### Debug nhanh
+
+1. Sau startup, xem log `Đã đồng bộ ... cờ tính năng vào In-Memory Cache`.
+2. Sau Apply, kiểm tra response của luồng sync và bảng `feature_flag_configs` trong DB của ứng dụng tiêu thụ.
+3. Kiểm tra map `features` trong response login/refresh có số key mong đợi.
+4. Nếu feature guard chặn method, kiểm tra tên flag, `enabled`, parent ID, strategy ID/params và context username/role/IP.
+
+## Tham khảo thêm
+
+- [FEATURE_FLAG_ROADMAP.md](FEATURE_FLAG_ROADMAP.md): call graph và các hàm chính.
+- [FEATURE_FLAG_SCALING.md](FEATURE_FLAG_SCALING.md): benchmark, giới hạn tải và triển khai vào `tracking-order`.
+- [FEATURE_FLAG_SERVICE_IMPL_GUIDE.html](FEATURE_FLAG_SERVICE_IMPL_GUIDE.html): hướng dẫn đọc `FeatureFlagConfigServiceImpl` theo workflow và code.
+- [FEATURE_FLAG_EVALUATE_FLOW.html](FEATURE_FLAG_EVALUATE_FLOW.html): sơ đồ trực quan luồng evaluate.

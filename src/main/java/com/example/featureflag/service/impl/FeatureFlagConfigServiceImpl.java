@@ -80,7 +80,9 @@ public class FeatureFlagConfigServiceImpl implements FeatureFlagConfigService {
                 strategyMap.size(), strategyMap.keySet());
     }
 
-    /** Constructor dùng khi khởi tạo service trực tiếp ngoài Spring. */
+    /**
+     * Constructor dùng khi khởi tạo service trực tiếp ngoài Spring.
+     */
     public FeatureFlagConfigServiceImpl(
             FeatureFlagConfigRepo featureFlagConfigRepo,
             ObjectMapper objectMapper,
@@ -93,21 +95,23 @@ public class FeatureFlagConfigServiceImpl implements FeatureFlagConfigService {
     // CACHE LIFECYCLE: nạp cấu hình từ DB vào RAM khi khởi động hoặc đồng bộ
     // ========================================================================
 
-    /** Nạp cache cấu hình ngay sau khi Spring khởi tạo service. */
+    /**
+     * Nạp cache cấu hình ngay sau khi Spring khởi tạo service.
+     */
     @PostConstruct
     public void initCache() {
         refreshCache();
     }
 
-    /**
-     * Nạp mới toàn bộ cờ từ Database vào In-Memory Cache RAM.
-     */
+
+    //     Nạp mới toàn bộ cờ từ Database vào In-Memory Cache RAM.
     public synchronized void refreshCache() {
         try {
             List<FeatureFlagConfig> allConfigs = featureFlagConfigRepo.findAll();
             Map<String, List<FeatureFlagConfig>> newFlagCache = allConfigs.stream()
                     .collect(Collectors.groupingBy(c -> normalizeFlagName(c.getFlagName())));
 
+            // tìm config cha theo ID. Nếu trùng ID, merge function giữ entity đầu tiên.
             Map<String, FeatureFlagConfig> newIdCache = allConfigs.stream()
                     .filter(c -> hasText(c.getId()))
                     .collect(Collectors.toMap(FeatureFlagConfig::getId, c -> c, (existing, replacing) -> existing));
@@ -128,13 +132,14 @@ public class FeatureFlagConfigServiceImpl implements FeatureFlagConfigService {
         }
     }
 
-    /** Parse JSON strategies once when configuration enters the cache. */
+    //    Phân tích strategy JSON một lần khi nạp vào cache.
     private List<StrategyItemSync> parseStrategies(String json) {
         if (!hasText(json)) {
             return List.of();
         }
         try {
-            return objectMapper.readValue(json, new TypeReference<List<StrategyItemSync>>() { });
+            return objectMapper.readValue(json, new TypeReference<List<StrategyItemSync>>() {
+            });
         } catch (JsonProcessingException e) {
             log.error("Không thể parse JSON chiến lược: {}", json, e);
             throw new IllegalArgumentException("Lỗi cú pháp JSON chiến lược: " + json, e);
@@ -145,20 +150,27 @@ public class FeatureFlagConfigServiceImpl implements FeatureFlagConfigService {
     // SNAPSHOT SYNC: lưu snapshot mới vào DB rồi làm mới cache RAM
     // ========================================================================
 
-    /** Đồng bộ snapshot cấu hình và cập nhật cache RAM sau khi lưu thành công. */
+    /**
+     * Đồng bộ snapshot cấu hình và cập nhật cache RAM sau khi lưu thành công.
+     */
     @Override
     @Transactional
     public int syncSnapshot(FeatureFlagSyncRequest request) {
+
         if (request == null || request.getFeatures() == null) {
-            log.warn("Payload snapshot cờ rỗng -> Bỏ qua đồng bộ");
+            log.warn("snapshot cờ rỗng -> Bỏ qua đồng bộ");
             return 0;
         }
 
         String version = resolveSnapshotVersion(request);
 
         List<FeatureFlagConfig> existingConfigs = featureFlagConfigRepo.findAll();
+
+        // Tạo map tên flag → entity hiện có, để cập nhật thay vì tạo mới.
         Map<String, FeatureFlagConfig> existingByName = indexConfigsByFlagName(existingConfigs);
+
         SnapshotMapping mapping = mapIncomingSnapshot(request.getFeatures(), version, existingByName);
+
         List<FeatureFlagConfig> toDelete = findRemovedConfigs(existingConfigs, mapping.incomingFlagNames());
 
         if (!toDelete.isEmpty()) {
@@ -166,6 +178,7 @@ public class FeatureFlagConfigServiceImpl implements FeatureFlagConfigService {
         }
 
         featureFlagConfigRepo.saveAll(mapping.configsToSave());
+
         featureFlagConfigRepo.flush();
 
         refreshCache();
@@ -175,7 +188,7 @@ public class FeatureFlagConfigServiceImpl implements FeatureFlagConfigService {
         return mapping.configsToSave().size();
     }
 
-    /** Tạo lookup hiện tại để cập nhật entity cũ thay vì tạo trùng config. */
+    //    Tạo lookup hiện tại để cập nhật entity cũ thay vì tạo trùng config.
     private Map<String, FeatureFlagConfig> indexConfigsByFlagName(List<FeatureFlagConfig> configs) {
         return configs.stream()
                 .collect(Collectors.toMap(
@@ -185,7 +198,7 @@ public class FeatureFlagConfigServiceImpl implements FeatureFlagConfigService {
                 ));
     }
 
-    /** Map các mục hợp lệ trong snapshot sang entity cần lưu và ghi nhận tên flag đầu vào. */
+    //    Duyệt từng item, tạo danh sách cần lưu và tập tên đang có trong snapshot.
     private SnapshotMapping mapIncomingSnapshot(
             List<FeatureFlagSyncItem> features,
             String version,
@@ -205,7 +218,7 @@ public class FeatureFlagConfigServiceImpl implements FeatureFlagConfigService {
         return new SnapshotMapping(configsToSave, incomingFlagNames);
     }
 
-    /** Bỏ cấu hình cũ không còn xuất hiện trong snapshot mới. */
+    //  Bỏ cấu hình cũ không còn xuất hiện trong snapshot mới.
     private List<FeatureFlagConfig> findRemovedConfigs(
             List<FeatureFlagConfig> existingConfigs,
             Set<String> incomingFlagNames) {
@@ -214,11 +227,13 @@ public class FeatureFlagConfigServiceImpl implements FeatureFlagConfigService {
                 .toList();
     }
 
-    /** Chuyển một mục snapshot thành entity mới hoặc cập nhật entity hiện có. */
+    //   Chuyển một mục snapshot thành entity mới hoặc cập nhật entity hiện có.
     private FeatureFlagConfig toConfig(
             FeatureFlagSyncItem feature,
             String version,
             Map<String, FeatureFlagConfig> existingByName) {
+
+//        Bỏ item null/không có tên
         if (feature == null || !hasText(feature.getFlagName())) {
             return null;
         }
@@ -242,6 +257,7 @@ public class FeatureFlagConfigServiceImpl implements FeatureFlagConfigService {
         return config;
     }
 
+    //    Dùng version gửi lên
     private String resolveSnapshotVersion(FeatureFlagSyncRequest request) {
         return hasText(request.getVersion()) ? request.getVersion() : "v-" + System.currentTimeMillis();
     }
@@ -251,6 +267,7 @@ public class FeatureFlagConfigServiceImpl implements FeatureFlagConfigService {
             return null;
         }
         try {
+            // convert object thành json
             return objectMapper.writeValueAsString(strategies);
         } catch (JsonProcessingException e) {
             log.warn("Lỗi serialize strategies sang JSON", e);
@@ -258,15 +275,7 @@ public class FeatureFlagConfigServiceImpl implements FeatureFlagConfigService {
         }
     }
 
-    private record SnapshotMapping(
-            List<FeatureFlagConfig> configsToSave,
-            Set<String> incomingFlagNames) { }
-
-    // ========================================================================
-    // SINGLE-FLAG EVALUATION: public check and its evaluation helpers
-    // ========================================================================
-
-    /** Đánh giá một flag theo context của request hiện tại. */
+    //  Đánh giá một flag theo context của request hiện tại
     @Override
     @Transactional(readOnly = true)
     public boolean isEnabled(String flagName) {
@@ -292,19 +301,24 @@ public class FeatureFlagConfigServiceImpl implements FeatureFlagConfigService {
         return configs.stream().anyMatch(c -> evaluateConfig(c, context, new HashSet<>()));
     }
 
-    /** Đánh giá một config: công tắc, cờ cha và strategies AND/OR. */
+    // ========================================================================
+    // SINGLE-FLAG EVALUATION: public check and its evaluation helpers
+    // ========================================================================
+
+
+    //  Đánh giá một config: công tắc, cờ cha và strategies AND/OR.
     private boolean evaluateConfig(FeatureFlagConfig config, EvaluationContext context, Set<String> visited) {
         if (config == null) {
             return false;
         }
         try {
-            // 1. Kiểm tra công tắc tổng của chính cờ này
+            // check tông quát của cờ
             if (!Boolean.TRUE.equals(config.getEnabled())) {
                 return false;
             }
 
-            // 2. Kiểm tra quan hệ Cha - Con (Hierarchy / parentId):
-            // Nếu có cờ cha -> cờ cha OFF kéo theo cờ con OFF, cờ cha ON mới check tiếp cờ con.
+            // Kiểm tra quan hệ Cha - Con
+            // Nếu có cờ cha -> cờ cha OFF kéo theo cờ con OFF, cờ cha ON mới check tiếp cờ con
             if (hasText(config.getParentId())) {
                 boolean parentActive = isParentActive(config.getParentId(), context, visited);
                 if (!parentActive) {
@@ -337,7 +351,6 @@ public class FeatureFlagConfigServiceImpl implements FeatureFlagConfigService {
 
     /**
      * Kiểm tra đệ quy xem cờ cha có đang hoạt động hay không.
-     * Chống vòng lặp vô tận (Circular Dependency) bằng tập hợp visited.
      */
     private boolean isParentActive(String parentId, EvaluationContext context, Set<String> visited) {
         if (!hasText(parentId)) {
@@ -362,9 +375,7 @@ public class FeatureFlagConfigServiceImpl implements FeatureFlagConfigService {
         return evaluateConfig(parentConfig, context, visited);
     }
 
-    /**
-     * Ủy thác việc đánh giá chiến lược cho đúng Strategy class phụ trách (Strategy Pattern).
-     */
+    //  Ủy thác việc đánh giá chiến lược cho đúng Strategy class phụ trách (Strategy Pattern)
     private boolean evaluateSingleStrategy(String strategyId, Map<String, String> params, EvaluationContext context) {
         if (strategyId == null)
             return false;
@@ -376,19 +387,12 @@ public class FeatureFlagConfigServiceImpl implements FeatureFlagConfigService {
             Map<String, String> safeParams = params != null ? params : Collections.emptyMap();
             return strategy.evaluate(safeParams, context);
         }
-
         log.warn("Không tìm thấy chiến lược xử lý cho '{}' -> Mặc định coi như tắt (false)", strategyId);
         return false;
     }
 
-    // ========================================================================
-    // ALL-FLAGS EVALUATION: bounded tasks, one flag per task
-    // ========================================================================
-
-    /**
-     * Đánh giá toàn bộ cờ theo context của request hiện tại.
-     * Mỗi task xử lý một flag; số task đang chạy/chờ bị giới hạn bởi {@code maxPendingTasks}.
-     */
+    //   Đánh giá toàn bộ cờ theo context
+//   Mỗi task xử lý một flag; số task đang chạy/chờ bị giới hạn bởi maxPendingTasks
     @Override
     @Transactional(readOnly = true)
     public Map<String, Boolean> evaluateAll() {
@@ -402,21 +406,28 @@ public class FeatureFlagConfigServiceImpl implements FeatureFlagConfigService {
                 return Collections.emptyMap();
             }
         }
-
+//      Tạo results để request thread ghi kết quả
         Map<String, Boolean> results = new HashMap<>(snapshot.size());
-        CompletionService<FlagEvaluationResult> completionService =
-                new ExecutorCompletionService<>(featureFlagExecutor);
+
+//      tạo CompletionService để nhận task theo thứ tự hoàn thành
+        CompletionService<FlagEvaluationResult> completionService = new ExecutorCompletionService<>(featureFlagExecutor);
+
+//      tạo pendingTasks để theo dõi future và tên flag tương ứng.
         Map<Future<FlagEvaluationResult>, String> pendingTasks = new HashMap<>();
+
+        // dùng Iterator để duyệt từng phần tử trong snapshop
         Iterator<Map.Entry<String, List<FeatureFlagConfig>>> remainingFlags = snapshot.entrySet().iterator();
 
         submitUntilWindowFull(remainingFlags, context, completionService, pendingTasks);
 
         while (!pendingTasks.isEmpty()) {
             try {
+                // take() đợi task kế tiếp hoàn thành
                 Future<FlagEvaluationResult> completedTask = completionService.take();
                 String flagName = pendingTasks.remove(completedTask);
 
                 try {
+//                  Request thread lấy kết quả bằng get(), ghi vào map, rồi gửi task mới để lấp chỗ trống
                     FlagEvaluationResult evaluation = completedTask.get();
                     results.put(evaluation.flagName(), evaluation.enabled());
                 } catch (ExecutionException e) {
@@ -435,7 +446,13 @@ public class FeatureFlagConfigServiceImpl implements FeatureFlagConfigService {
         return results;
     }
 
-    /** Submit cờ tiếp theo cho tới khi chạm giới hạn task đang chạy/chờ. */
+    // ========================================================================
+    // ALL-FLAGS EVALUATION: bounded tasks, one flag per task
+    // ========================================================================
+
+    /**
+     * Submit cờ tiếp theo cho tới khi chạm giới hạn task đang chạy/chờ.
+     */
     private void submitUntilWindowFull(
             Iterator<Map.Entry<String, List<FeatureFlagConfig>>> remainingFlags,
             EvaluationContext context,
@@ -461,12 +478,6 @@ public class FeatureFlagConfigServiceImpl implements FeatureFlagConfigService {
         }
     }
 
-    private record FlagEvaluationResult(String flagName, boolean enabled) { }
-
-    // ========================================================================
-    // REQUEST CONTEXT: capture ThreadLocal data before dispatching worker tasks
-    // ========================================================================
-
     private EvaluationContext captureContext() {
         return EvaluationContext.of(
                 getCurrentUsername(),
@@ -482,6 +493,10 @@ public class FeatureFlagConfigServiceImpl implements FeatureFlagConfigService {
         }
         return auth.getName();
     }
+
+    // ========================================================================
+    // REQUEST CONTEXT: capture ThreadLocal data before dispatching worker tasks
+    // ========================================================================
 
     private Collection<? extends GrantedAuthority> getCurrentAuthorities() {
         Authentication auth = SecurityContextHolder.getContext().getAuthentication();
@@ -521,15 +536,23 @@ public class FeatureFlagConfigServiceImpl implements FeatureFlagConfigService {
         }
     }
 
-    // ========================================================================
-    // SHARED UTILITIES
-    // ========================================================================
-
     private String normalizeFlagName(String flagName) {
         return flagName.toUpperCase(Locale.ROOT);
     }
 
     private boolean hasText(String value) {
         return value != null && !value.isBlank();
+    }
+
+    // ========================================================================
+    // SHARED UTILITIES
+    // ========================================================================
+
+    private record SnapshotMapping(
+            List<FeatureFlagConfig> configsToSave,
+            Set<String> incomingFlagNames) {
+    }
+
+    private record FlagEvaluationResult(String flagName, boolean enabled) {
     }
 }
